@@ -83,7 +83,12 @@ def extract_w2_from_pdf(pdf_path: str) -> dict:
     if not text.strip():
         raise ValueError("Could not extract text from PDF")
 
-    print(f"\n--- Extracted Text ---\n{text[:1500]}\n---")
+    # Log full raw text so we can debug extraction patterns
+    print(f"\n{'='*60}")
+    print("RAW EXTRACTED TEXT:")
+    print('='*60)
+    print(text[:3000])
+    print('='*60 + "\n")
 
     data = {}
 
