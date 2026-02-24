@@ -18,7 +18,8 @@ if errorlevel 1 (
 )
 
 echo  [1/3] Python found. Installing packages...
-pip install pyautogui pyperclip pdfplumber watchdog pytesseract pdf2image Pillow psutil pygetwindow
+python -m pip install --upgrade pip
+python -m pip install pyautogui pyperclip pdfplumber watchdog pytesseract pdf2image Pillow psutil pygetwindow
 
 echo.
 echo  [2/3] Checking Tesseract OCR...
