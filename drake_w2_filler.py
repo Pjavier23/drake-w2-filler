@@ -360,24 +360,7 @@ def fill_drake_w2_screen(data: dict):
             "Please open Drake Tax and navigate to the W-2 entry screen, then try again."
         )
 
-    # ── Step 2: Find and focus the Drake window
-    print("  🔍 Looking for Drake window...")
-    if not focus_drake_window():
-        raise RuntimeError(
-            "Could not find the Drake Tax window.\n"
-            "Make sure Drake is open with a return loaded and the W-2 screen visible."
-        )
-    print("  ✅ Drake window focused")
-
-    # ── Step 3: Click the EIN field
-    print("  🖱️  Clicking EIN field...")
-    if not click_ein_field():
-        raise RuntimeError(
-            "Could not locate the EIN field on screen.\n"
-            "Please click the EIN field manually in Drake, then re-drop the PDF."
-        )
-
-    time.sleep(0.5)
+    # Countdown is handled by the caller (process_pdf) before this function runs
     print("  ⌨️  Starting field fill...")
 
     # ── EIN
@@ -604,9 +587,12 @@ class App:
                     f"Box 5 Med Wg: {data.get('box5_med_wages') or '—'}\n"
                     f"Box 6 Med Tx: {data.get('box6_med_tax') or '—'}\n"
                     f"State:        {data.get('box15_state') or '—'}\n\n"
-                    f"Make sure Drake is open on the W-2 screen.\n"
-                    f"After clicking YES, click the EIN field in Drake\n"
-                    f"within 3 seconds.\n\n"
+                    f"─────────────────────────────\n"
+                    f"Click YES, then you have 5 seconds to:\n"
+                    f"  1. Switch to Drake\n"
+                    f"  2. Click the EIN input field\n"
+                    f"Then hold still — script fills everything.\n"
+                    f"─────────────────────────────\n\n"
                     f"Click YES to fill, NO to skip."
                 )
                 confirmed[0] = messagebox.askyesno("Confirm Fill", summary)
@@ -615,6 +601,11 @@ class App:
             time.sleep(1.5)
 
             if confirmed[0]:
+                self.log_msg("⏳ 5 seconds — click the EIN field in Drake NOW!")
+                for i in range(5, 0, -1):
+                    self.log_msg(f"   {i}...")
+                    time.sleep(1)
+                self.log_msg("⌨️  Typing...")
                 fill_drake_w2_screen(data)
                 self.log_msg("✅ Drake fill complete!\n")
 
