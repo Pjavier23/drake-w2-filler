@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
-Drake W-2 Auto-Filler
-=====================
-Watches a folder for W-2 PDFs, extracts field data via OCR,
-then fills Drake Tax's W-2 entry screen using keyboard automation.
+Drake W-2 Auto-Filler  v2.0  — Full Auto Mode
+==============================================
+Drop W-2 PDFs into the inbox folder.
+Script extracts data, launches Drake, opens the client return,
+navigates to the W-2 screen, and fills everything automatically.
 
-How it works:
-  1. Run this script (keep it running in background)
-  2. Open Drake, open the client return, navigate to the W-2 entry screen
-  3. Drop a W-2 PDF into C:\W2_Inbox\
-  4. Script detects the PDF, reads the data, checks Drake is open
-  5. Confirmation popup shows extracted data — click YES
-  6. Script auto-focuses the Drake window, finds the EIN field, fills everything
+Modes:
+  FULL AUTO  — launches Drake, opens return, navigates, fills
+  MANUAL     — Drake already open on W-2 screen, just fills
 
 Requirements:
   pip install pyautogui pyperclip pdfplumber watchdog pytesseract pillow psutil pygetwindow
-  Also install Tesseract: https://github.com/UB-Mannheim/tesseract/wiki
 """
 
 import os
@@ -33,6 +29,7 @@ import pyperclip
 import pdfplumber
 import psutil
 import pygetwindow as gw
+from drake_auto import run_full_auto, launch_drake, open_return_by_ssn, navigate_to_w2_screen
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WATCH_FOLDER = r"C:\W2_Inbox"
@@ -96,10 +93,17 @@ def extract_w2_from_pdf(pdf_path: str) -> dict:
         m = re.search(pattern, text, flags)
         return m.group(1).strip() if m else ""
 
+    # Employee SSN (box a) — critical for auto-opening client return
+    data['employee_ssn'] = find(r'(?:a\.?\s+)?Employee(?:\'s)?\s+social\s+security\s+(?:number|no\.?)[:\s]+([\d]{3}-[\d]{2}-[\d]{4})')
+    if not data['employee_ssn']:
+        data['employee_ssn'] = find(r'\b(\d{3}-\d{2}-\d{4})\b')
+
     # Employer EIN
     data['ein'] = find(r'(?:b\.?\s+)?Employer(?:\'s)?\s+(?:identification|ID|id)\s+(?:number|no\.?)[:\s]+([\d]{2}-[\d]{7})')
     if not data['ein']:
         data['ein'] = find(r'EIN[:\s]+([\d]{2}-[\d]{7})')
+    if not data['ein']:
+        data['ein'] = find(r'\b(\d{2}-\d{7})\b')
 
     # Employer Name
     data['employer_name'] = find(r'(?:c\.?\s+)?Employer(?:\'s)?\s+name[,\s]+address.*?[\r\n]+([^\r\n]+)')
@@ -480,8 +484,21 @@ class App:
         tk.Label(root, text="🦅 Drake W-2 Auto-Filler",
                  font=("Segoe UI", 18, "bold"),
                  fg="#00d9ff", bg="#1a1a1a").pack(pady=(20, 4))
-        tk.Label(root, text="Drop a W-2 PDF → auto-fills Drake",
-                 font=("Segoe UI", 10), fg="#888", bg="#1a1a1a").pack()
+
+        # Mode toggle
+        self.full_auto = tk.BooleanVar(value=True)
+        mode_frame = tk.Frame(root, bg="#1a1a1a")
+        mode_frame.pack(pady=(4, 0))
+        tk.Label(mode_frame, text="Mode:", font=("Segoe UI", 10),
+                 fg="#888", bg="#1a1a1a").pack(side="left", padx=(0, 6))
+        tk.Radiobutton(mode_frame, text="🤖 Full Auto  (opens Drake + return automatically)",
+                       variable=self.full_auto, value=True,
+                       font=("Segoe UI", 9), fg="#00ff88", bg="#1a1a1a",
+                       selectcolor="#0f0f0f", activebackground="#1a1a1a").pack(side="left")
+        tk.Radiobutton(mode_frame, text="✋ Manual  (Drake already open on W-2 screen)",
+                       variable=self.full_auto, value=False,
+                       font=("Segoe UI", 9), fg="#ffcc00", bg="#1a1a1a",
+                       selectcolor="#0f0f0f", activebackground="#1a1a1a").pack(side="left", padx=(12, 0))
 
         # Log area
         self.log = scrolledtext.ScrolledText(
@@ -592,12 +609,14 @@ class App:
                     f"Box 5 Med Wg: {data.get('box5_med_wages') or '—'}\n"
                     f"Box 6 Med Tx: {data.get('box6_med_tax') or '—'}\n"
                     f"State:        {data.get('box15_state') or '—'}\n\n"
-                    f"─────────────────────────────\n"
-                    f"Click YES, then you have 5 seconds to:\n"
-                    f"  1. Switch to Drake\n"
-                    f"  2. Click the EIN input field\n"
-                    f"Then hold still — script fills everything.\n"
-                    f"─────────────────────────────\n\n"
+                    f"SSN:          {data.get('employee_ssn') or '—'}\n\n"
+                    f"─────────────────────────────\n" +
+                    (
+                        f"FULL AUTO: Will open Drake, find client\nby SSN, navigate to W-2, and fill.\nJust click YES and stay out of the way."
+                        if self.full_auto.get() else
+                        f"MANUAL: Click YES, then you have\n5 seconds to click the EIN field in Drake."
+                    ) +
+                    f"\n─────────────────────────────\n\n"
                     f"Click YES to fill, NO to skip."
                 )
                 confirmed[0] = messagebox.askyesno("Confirm Fill", summary)
@@ -608,12 +627,18 @@ class App:
             dialog_done.wait(timeout=120)  # wait up to 2 min for user to click YES/NO
 
             if confirmed[0]:
-                self.log_msg("⏳ 5 seconds — click the EIN field in Drake NOW!")
-                for i in range(5, 0, -1):
-                    self.log_msg(f"   {i}...")
-                    time.sleep(1)
-                self.log_msg("⌨️  Typing...")
-                fill_drake_w2_screen(data)
+                if self.full_auto.get():
+                    # ── FULL AUTO MODE ──────────────────────────────────────
+                    self.log_msg("🤖 Full Auto mode — taking control...")
+                    run_full_auto(data, fill_drake_w2_screen, log_fn=self.log_msg)
+                else:
+                    # ── MANUAL MODE ─────────────────────────────────────────
+                    self.log_msg("⏳ 5 seconds — click the EIN field in Drake NOW!")
+                    for i in range(5, 0, -1):
+                        self.log_msg(f"   {i}...")
+                        time.sleep(1)
+                    self.log_msg("⌨️  Typing...")
+                    fill_drake_w2_screen(data)
                 self.log_msg("✅ Drake fill complete!\n")
 
                 done_path = Path(DONE_FOLDER) / Path(pdf_path).name
