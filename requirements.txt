@@ -1,0 +1,9 @@
+pyautogui>=0.9.54
+pyperclip>=1.8.2
+pdfplumber>=0.10.0
+watchdog>=4.0.0
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+Pillow>=10.0.0
+psutil>=5.9.0
+pygetwindow>=0.0.9
