@@ -358,11 +358,11 @@ def fill_drake_w2_screen(data: dict):
       Box15(ST, StateID) → Box16 → Box17 → Box18 → Box19 → Box20 × 2 rows
     """
 
-    # ── Step 1: Check Drake is actually running
-    if not is_drake_running():
+    # ── Step 1: Check Drake window is visible (more reliable than process name check)
+    if not find_drake_window():
         raise RuntimeError(
-            "Drake doesn't appear to be running.\n"
-            "Please open Drake Tax and navigate to the W-2 entry screen, then try again."
+            "Could not find the Drake Tax window.\n"
+            "Make sure Drake is open with a return loaded and the W-2 screen visible."
         )
 
     # Countdown is handled by the caller (process_pdf) before this function runs
