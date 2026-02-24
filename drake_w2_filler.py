@@ -219,20 +219,46 @@ def focus_drake_window() -> bool:
         return False
 
 def save_calibration(x: int, y: int):
-    """Save EIN field coordinates to disk."""
-    with open(CALIBRATION_FILE, 'w') as f:
-        json.dump({'ein_x': x, 'ein_y': y}, f)
-    print(f"  💾 Calibration saved: EIN field at ({x}, {y})")
+    """
+    Save EIN field position as offset relative to Drake window top-left.
+    This means calibration stays valid even if Drake moves to a different
+    position or monitor.
+    """
+    win = find_drake_window()
+    if win:
+        offset_x = x - win.left
+        offset_y = y - win.top
+        with open(CALIBRATION_FILE, 'w') as f:
+            json.dump({'offset_x': offset_x, 'offset_y': offset_y, 'abs_x': x, 'abs_y': y}, f)
+        print(f"  💾 Calibration saved: EIN offset from Drake window = ({offset_x}, {offset_y})")
+        print(f"       Works even if Drake moves to a different position or monitor.")
+    else:
+        # Fallback: save absolute if Drake window not found
+        with open(CALIBRATION_FILE, 'w') as f:
+            json.dump({'offset_x': None, 'offset_y': None, 'abs_x': x, 'abs_y': y}, f)
+        print(f"  💾 Calibration saved (absolute): EIN at ({x}, {y})")
 
 def load_calibration() -> tuple:
-    """Load saved EIN field coordinates. Returns (x, y) or (None, None)."""
-    if CALIBRATION_FILE.exists():
-        try:
-            with open(CALIBRATION_FILE) as f:
-                d = json.load(f)
-            return d.get('ein_x'), d.get('ein_y')
-        except Exception:
-            pass
+    """
+    Load EIN field position.
+    Returns absolute (x, y) by adding saved offset to current Drake window position.
+    Falls back to saved absolute coords if Drake window not found.
+    """
+    if not CALIBRATION_FILE.exists():
+        return None, None
+    try:
+        with open(CALIBRATION_FILE) as f:
+            d = json.load(f)
+        offset_x = d.get('offset_x')
+        offset_y = d.get('offset_y')
+        if offset_x is not None and offset_y is not None:
+            win = find_drake_window()
+            if win:
+                return win.left + offset_x, win.top + offset_y
+        # Fallback to absolute
+        return d.get('abs_x'), d.get('abs_y')
+    except Exception:
+        pass
     return None, None
 
 def run_calibration(log_fn=print):
