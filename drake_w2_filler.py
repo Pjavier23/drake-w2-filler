@@ -596,9 +596,11 @@ class App:
                     f"Click YES to fill, NO to skip."
                 )
                 confirmed[0] = messagebox.askyesno("Confirm Fill", summary)
+                dialog_done.set()
 
+            dialog_done = threading.Event()
             self.root.after(0, ask)
-            time.sleep(1.5)
+            dialog_done.wait(timeout=120)  # wait up to 2 min for user to click YES/NO
 
             if confirmed[0]:
                 self.log_msg("⏳ 5 seconds — click the EIN field in Drake NOW!")
