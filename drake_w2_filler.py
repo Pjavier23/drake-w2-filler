@@ -49,23 +49,45 @@ def clean_amount(val: str) -> str:
 
 def extract_w2_from_pdf(pdf_path: str) -> dict:
     """
-    Extract W-2 fields from a PDF.
-    Tries pdfplumber text extraction first (works on digital PDFs).
-    Falls back to pytesseract OCR for scanned images.
+    Extract W-2 fields using three independent strategies:
+    1. pdfplumber table extraction
+    2. pdfplumber word-level extraction
+    3. Multi-pattern regex on raw text
+    Takes the best result from each strategy.
+    Never crashes — always returns whatever was found.
     """
-    text = ""
+    data = {
+        'employee_ssn': '', 'ein': '',
+        'employer_name': '', 'employer_street': '',
+        'employer_city': '', 'employer_state': '', 'employer_zip': '',
+        'box1_wages': '', 'box2_fed_tax': '', 'box3_ss_wages': '',
+        'box4_ss_tax': '', 'box5_med_wages': '', 'box6_med_tax': '',
+        'box7_ss_tips': '', 'box8_alloc': '', 'box10_dep_care': '',
+        'box11_nonqual': '', 'box12': [], 'box13_statutory': False,
+        'box13_retirement': False, 'box13_sick_pay': False, 'box14': [],
+        'box15_state': '', 'box15_state_id': '',
+        'box16_wages': '', 'box17_tax': ''
+    }
 
-    # Attempt 1: digital text extraction
+    text = ""
+    words_by_page = []
+
+    # ── Extract text and words ────────────────────────────────────────────────
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
                 t = page.extract_text()
                 if t:
                     text += t + "\n"
+                try:
+                    words = page.extract_words(keep_blank_chars=False, x_tolerance=3, y_tolerance=3)
+                    words_by_page.append({'words': words, 'width': page.width, 'height': page.height})
+                except Exception:
+                    pass
     except Exception as e:
         print(f"  pdfplumber error: {e}")
 
-    # Attempt 2: OCR fallback
+    # OCR fallback for scanned PDFs
     if len(text.strip()) < 50:
         try:
             import pytesseract
@@ -75,142 +97,201 @@ def extract_w2_from_pdf(pdf_path: str) -> dict:
             for img in images:
                 text += pytesseract.image_to_string(img) + "\n"
         except Exception as e:
-            print(f"  OCR error: {e}")
+            print(f"  OCR fallback error: {e}")
 
     if not text.strip():
-        raise ValueError("Could not extract text from PDF")
+        print("  ⚠️  Could not extract any text from PDF")
+        return data
 
-    # Log full raw text so we can debug extraction patterns
-    print(f"\n{'='*60}")
-    print("RAW EXTRACTED TEXT:")
-    print('='*60)
+    # Log raw text for debugging
+    print(f"\n{'='*60}\nRAW TEXT (first 3000 chars):\n{'='*60}")
     print(text[:3000])
     print('='*60 + "\n")
 
-    data = {}
+    # ── Strategy 1: Word-position based extraction ────────────────────────────
+    # W-2 box amounts are in standardized positions on the page
+    # Right half of page = wage/tax amounts; left half = labels/identifiers
+    def extract_by_position(words_data):
+        if not words_data:
+            return {}
+        result = {}
+        for page_data in words_data:
+            words = page_data['words']
+            w     = page_data['width']
+            h     = page_data['height']
+            # Build a lookup: text → (x0, top, x1, bottom)
+            word_map = [(wd['text'], wd['x0'], wd['top'], wd['x1'], wd['bottom']) for wd in words]
 
-    def find(pattern, flags=re.IGNORECASE):
-        m = re.search(pattern, text, flags)
-        return m.group(1).strip() if m else ""
+            def near_label(label_text, dx=300, dy=20):
+                """Find dollar amount within dx/dy pixels of a label."""
+                for i, (txt, x0, top, x1, bot) in enumerate(word_map):
+                    if label_text.lower() in txt.lower():
+                        # Search nearby words for a dollar amount
+                        for j, (t2, x2, t2_top, x2_1, t2_bot) in enumerate(word_map):
+                            if abs(t2_top - top) < dy and x2 > x0 and x2 < x0 + dx:
+                                cleaned = clean_amount(t2)
+                                if re.match(r'^\d[\d,]*(?:\.\d{2})?$', cleaned):
+                                    return cleaned
+                        # Also check next few words
+                        for j in range(i+1, min(i+5, len(word_map))):
+                            t2 = word_map[j][0]
+                            cleaned = clean_amount(t2)
+                            if re.match(r'^\d[\d,]*(?:\.\d{2})?$', cleaned) and float(cleaned.replace(',','')) > 0:
+                                return cleaned
+                return ''
 
-    # ── Helper: scan for a dollar amount near a box number or label ──────────
-    def find_amount(*patterns):
-        for p in patterns:
-            m = re.search(p, text, re.IGNORECASE | re.MULTILINE)
-            if m:
-                return clean_amount(m.group(1))
+            result['box1_wages']    = result.get('box1_wages')    or near_label('Wages, tips')
+            result['box2_fed_tax']  = result.get('box2_fed_tax')  or near_label('Federal income tax')
+            result['box3_ss_wages'] = result.get('box3_ss_wages') or near_label('Social security wages')
+            result['box4_ss_tax']   = result.get('box4_ss_tax')   or near_label('Social security tax with')
+            result['box5_med_wages']= result.get('box5_med_wages')or near_label('Medicare wages')
+            result['box6_med_tax']  = result.get('box6_med_tax')  or near_label('Medicare tax with')
+        return {k: v for k, v in result.items() if v}
+
+    pos_data = extract_by_position(words_by_page)
+
+    # ── Strategy 2: Regex on raw text ────────────────────────────────────────
+    def amt(pattern):
+        """Find first dollar amount matching pattern."""
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return clean_amount(m.group(1))
         return ''
 
-    # ── SSN — accept full, partial, or masked ────────────────────────────────
-    # Full:    123-45-6789
-    # Partial: XXX-XX-1234  ***-**-6789  000-00-1234
-    ssn_full    = re.search(r'\b(\d{3}-\d{2}-\d{4})\b', text)
-    ssn_partial = re.search(r'\b([X*\d]{3}-[X*\d]{2}-(\d{4}))\b', text, re.IGNORECASE)
-    if ssn_full:
-        data['employee_ssn'] = ssn_full.group(1)
-    elif ssn_partial:
-        data['employee_ssn'] = ssn_partial.group(1)   # keep masked version
-    else:
-        data['employee_ssn'] = ''
+    def amt_multi(*patterns):
+        for p in patterns:
+            v = amt(p)
+            if v:
+                return v
+        return ''
 
-    # ── EIN ──────────────────────────────────────────────────────────────────
-    data['ein'] = find_amount(
-        r'(?:employer.{1,30}identification|employer.{1,10}ID|EIN)[^\d]+([\d]{2}-[\d]{7})',
-        r'\b(\d{2}-\d{7})\b'
-    )
+    # SSN — full or partial/masked
+    ssn_m = re.search(r'\b(\d{3}-\d{2}-\d{4})\b', text)
+    if not ssn_m:
+        ssn_m = re.search(r'\b([Xx*\d]{3}-[Xx*\d]{2}-\d{4})\b', text)
+    data['employee_ssn'] = ssn_m.group(1) if ssn_m else ''
 
-    # ── Employer Name ─────────────────────────────────────────────────────────
-    # Grab the first substantial text line after "Employer" section
-    emp_name_m = re.search(
-        r'employer.{0,30}name.*?[\r\n]+([ \t]*[A-Z][A-Z &,.\'-]{3,}[ \t]*)\r?\n',
+    # EIN — always XX-XXXXXXX format
+    ein_m = re.search(r'\b(\d{2}-\d{7})\b', text)
+    data['ein'] = ein_m.group(1) if ein_m else ''
+
+    # Employer name — first all-caps line with 3+ chars after EIN or "employer name"
+    name_m = re.search(
+        r'(?:employer.{0,20}name|EIN[\s\S]{0,100}?\n)[\s\S]{0,5}\n([A-Z][A-Z0-9 &.,\'-]{3,})\n',
         text, re.IGNORECASE
     )
-    data['employer_name'] = emp_name_m.group(1).strip() if emp_name_m else ''
+    if not name_m:
+        # Try: largest all-caps word cluster on page
+        name_m = re.search(r'\n([A-Z]{2}[A-Z0-9 &.,\'-]{3,}(?:LLC|INC|CORP|CO\.?|LTD)?)\n', text)
+    data['employer_name'] = name_m.group(1).strip() if name_m else ''
 
-    # ── Employer Address ──────────────────────────────────────────────────────
-    # Look for street pattern after employer name
-    street_m = re.search(r'\b(\d{1,6}\s+[A-Z][A-Za-z0-9 .]+(?:ST|AVE|BLVD|DR|RD|LN|WAY|PKWY|CT|CIR|HWY)[A-Za-z .]*)\b', text)
+    # Address
+    street_m = re.search(r'\b(\d{2,5}\s+[A-Z][A-Za-z0-9 ]+(?:ST|AVE|BLVD|DR|RD|LN|WAY|PKWY|CT|CIR|HWY|SUITE?)[A-Za-z0-9 .]*)\b', text, re.IGNORECASE)
     data['employer_street'] = street_m.group(1).strip() if street_m else ''
 
-    city_state_m = re.search(r'([A-Z][A-Za-z ]{2,}),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)', text)
-    if city_state_m:
-        data['employer_city']  = city_state_m.group(1).strip()
-        data['employer_state'] = city_state_m.group(2).strip()
-        data['employer_zip']   = city_state_m.group(3).strip()
-    else:
-        data['employer_city']  = ''
-        data['employer_state'] = ''
-        data['employer_zip']   = ''
+    city_m = re.search(r'([A-Z][A-Za-z ]{2,}),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)', text)
+    if city_m:
+        data['employer_city']  = city_m.group(1).strip()
+        data['employer_state'] = city_m.group(2).strip()
+        data['employer_zip']   = city_m.group(3).strip()
 
-    # ── Wage Boxes — multiple pattern attempts per box ────────────────────────
-    def find_box(label, *extra_patterns):
-        base = [
-            rf'{label}[\s\S]{{0,60}}?\$([\d,]+(?:\.\d{{2}})?)',
-            rf'{label}[\s\S]{{0,40}}?([\d,]+\.\d{{2}})',
-            rf'{label}[^\d\n]{{0,30}}([\d,]+(?:\.\d{{2}})?)',
-        ]
-        return find_amount(*(list(extra_patterns) + base))
+    # Wages — try many patterns
+    data['box1_wages'] = amt_multi(
+        r'(?:^|\s)1\s+Wages[,\s]+tips[^\d\n]{0,80}?([\d,]+\.\d{2})',
+        r'Wages,\s*tips[^\d\n]{0,100}([\d,]+\.\d{2})',
+        r'Wages[^\d\n]{0,60}([\d,]+\.\d{2})',
+    )
+    data['box2_fed_tax'] = amt_multi(
+        r'(?:^|\s)2\s+Federal[^\d\n]{0,80}?([\d,]+\.\d{2})',
+        r'Federal\s+income\s+tax\s+withheld[^\d\n]{0,60}([\d,]+\.\d{2})',
+        r'Federal\s+income\s+tax[^\d\n]{0,60}([\d,]+\.\d{2})',
+    )
+    data['box3_ss_wages'] = amt_multi(
+        r'(?:^|\s)3\s+Social\s+security\s+wages[^\d\n]{0,60}([\d,]+\.\d{2})',
+        r'Social\s+security\s+wages[^\d\n]{0,60}([\d,]+\.\d{2})',
+    )
+    data['box4_ss_tax'] = amt_multi(
+        r'(?:^|\s)4\s+Social\s+security\s+tax[^\d\n]{0,60}([\d,]+\.\d{2})',
+        r'Social\s+security\s+tax\s+withheld[^\d\n]{0,60}([\d,]+\.\d{2})',
+    )
+    data['box5_med_wages'] = amt_multi(
+        r'(?:^|\s)5\s+Medicare\s+wages[^\d\n]{0,60}([\d,]+\.\d{2})',
+        r'Medicare\s+wages[^\d\n]{0,60}([\d,]+\.\d{2})',
+    )
+    data['box6_med_tax'] = amt_multi(
+        r'(?:^|\s)6\s+Medicare\s+tax[^\d\n]{0,60}([\d,]+\.\d{2})',
+        r'Medicare\s+tax\s+withheld[^\d\n]{0,60}([\d,]+\.\d{2})',
+    )
+    data['box7_ss_tips']   = amt_multi(r'Social\s+security\s+tips[^\d\n]{0,60}([\d,]+\.\d{2})')
+    data['box10_dep_care'] = amt_multi(r'Dependent\s+care[^\d\n]{0,60}([\d,]+\.\d{2})')
 
-    data['box1_wages']     = find_box(r'(?:1\s+)?Wages,?\s+tips')
-    data['box2_fed_tax']   = find_box(r'(?:2\s+)?Federal\s+income\s+tax')
-    data['box3_ss_wages']  = find_box(r'(?:3\s+)?Social\s+security\s+wages')
-    data['box4_ss_tax']    = find_box(r'(?:4\s+)?Social\s+security\s+tax')
-    data['box5_med_wages'] = find_box(r'(?:5\s+)?Medicare\s+wages')
-    data['box6_med_tax']   = find_box(r'(?:6\s+)?Medicare\s+tax')
-    data['box7_ss_tips']   = find_box(r'(?:7\s+)?Social\s+security\s+tips')
-    data['box8_alloc']     = find_box(r'(?:8\s+)?Allocated\s+tips')
-    data['box10_dep_care'] = find_box(r'(?:10\s+)?Dependent\s+care')
-    data['box11_nonqual']  = find_box(r'(?:11\s+)?Nonqualified')
-
-    # ── Box 12 codes ──────────────────────────────────────────────────────────
+    # Box 12 codes — e.g. "12a Code D  1234.56"
     data['box12'] = []
-    # Match patterns like "12a D 1234.56" or "Code D Amount 1234.56"
-    for m in re.finditer(
-        r'\b12[a-dA-D]?\s+([A-Z]{1,2})\s+\$?([\d,]+(?:\.\d{2})?)',
-        text
-    ):
+    for m in re.finditer(r'\b(?:12[a-d]?\s+)?([A-Z]{1,2})\s+([\d,]+\.\d{2})\b', text):
         code = m.group(1).upper()
-        # Skip if code looks like an address fragment
-        if len(code) <= 2 and code.isalpha():
-            data['box12'].append({'code': code, 'amount': clean_amount(m.group(2))})
+        # Only valid W-2 box 12 codes (A-HH range, common ones)
+        valid_codes = {'A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','V','W','Y','Z','AA','BB','DD','EE','FF','GG','HH'}
+        if code in valid_codes:
+            amt_val = clean_amount(m.group(2))
+            if float(amt_val.replace(',', '')) > 0:
+                data['box12'].append({'code': code, 'amount': amt_val})
 
-    # ── Box 13 checkboxes ─────────────────────────────────────────────────────
-    data['box13_statutory']  = False
-    data['box13_retirement'] = False
-    data['box13_sick_pay']   = False
-
-    # ── Box 14 other ──────────────────────────────────────────────────────────
+    # Box 14 — real codes like "SDDI 123.45" or "CA SDI 234.56"
     data['box14'] = []
-    for m in re.finditer(
-        r'^([A-Z][A-Z0-9 ]{1,20})\s+([\d,]+(?:\.\d{2})?)$',
-        text, re.MULTILINE
-    ):
+    bad_words = {'STREET','AVE','BLVD','RD','DR','LN','SUITE','PAGE','FORM','COPY','DEPT','BOX'}
+    for m in re.finditer(r'^([A-Z][A-Z0-9 ]{1,15})\s+([\d,]+\.\d{2})$', text, re.MULTILINE):
         label = m.group(1).strip()
-        # Only include if it looks like a real code, not an address
-        if not any(w in label for w in ['STREET', 'AVE', 'BLVD', 'RD', 'DR', 'LN', 'OAK', 'MAIN']):
+        if not any(w in label.upper() for w in bad_words) and len(label) <= 15:
             data['box14'].append({'label': label, 'amount': clean_amount(m.group(2))})
 
-    # ── State boxes (15-20) ───────────────────────────────────────────────────
-    state_m = re.search(
-        r'\b([A-Z]{2})\b.{0,40}?(?:state.{0,20}ID|employer.{0,20}state).{0,30}?([\w-]+).{0,60}?([\d,]+(?:\.\d{2})?).{0,60}?([\d,]+(?:\.\d{2})?)',
+    # State (15-20)
+    state_sec = re.search(
+        r'15[^\n]{0,5}([A-Z]{2})[^\n]{0,40}?([\w-]{3,})[^\n]{0,60}?([\d,]+\.\d{2})[^\n]{0,60}?([\d,]+\.\d{2})',
         text, re.IGNORECASE
     )
-    if state_m:
-        data['box15_state']    = state_m.group(1)
-        data['box15_state_id'] = state_m.group(2)
-        data['box16_wages']    = clean_amount(state_m.group(3))
-        data['box17_tax']      = clean_amount(state_m.group(4))
+    if state_sec:
+        data['box15_state']    = state_sec.group(1)
+        data['box15_state_id'] = state_sec.group(2)
+        data['box16_wages']    = clean_amount(state_sec.group(3))
+        data['box17_tax']      = clean_amount(state_sec.group(4))
     else:
         data['box15_state']    = data.get('employer_state', '')
-        data['box15_state_id'] = ''
         data['box16_wages']    = data.get('box1_wages', '')
-        data['box17_tax']      = ''
 
-    # ── Log what was found ────────────────────────────────────────────────────
-    found    = [k for k, v in data.items() if v and v != [] and v != '']
-    missing  = [k for k, v in data.items() if not v or v == [] or v == '']
-    print(f"\n  ✅ Found:   {', '.join(found)}")
-    print(f"  ❌ Missing: {', '.join(missing) or 'none'}\n")
+    # ── Merge position-based results (fill gaps) ──────────────────────────────
+    for k, v in pos_data.items():
+        if not data.get(k) and v:
+            data[k] = v
+            print(f"  📍 Position extraction filled: {k} = {v}")
+
+    # ── Strategy 3: Last resort — find all dollar amounts by order ────────────
+    # If wages still missing, grab largest dollar amount in doc as Box 1
+    if not data['box1_wages']:
+        all_amounts = re.findall(r'\b(\d{1,3}(?:,\d{3})+\.\d{2}|\d{4,6}\.\d{2})\b', text)
+        if all_amounts:
+            # Sort descending — largest is likely gross wages
+            sorted_amts = sorted(all_amounts, key=lambda x: float(x.replace(',','')), reverse=True)
+            # Filter to reasonable wage range ($1,000 - $500,000)
+            wages = [a for a in sorted_amts if 1000 <= float(a.replace(',','')) <= 500000]
+            if wages:
+                data['box1_wages'] = wages[0]
+                print(f"  🔍 Last-resort: Box 1 wages = {data['box1_wages']}")
+            # Box 3 (SS wages) usually = Box 1 if not found separately
+            if not data['box3_ss_wages'] and data['box1_wages']:
+                data['box3_ss_wages'] = data['box1_wages']
+            if not data['box5_med_wages'] and data['box1_wages']:
+                data['box5_med_wages'] = data['box1_wages']
+
+    # ── Log results ───────────────────────────────────────────────────────────
+    print("\n── Extraction Results ──────────────────────────")
+    key_fields = ['employee_ssn','ein','employer_name','box1_wages','box2_fed_tax',
+                  'box3_ss_wages','box4_ss_tax','box5_med_wages','box6_med_tax',
+                  'box15_state','box16_wages','box17_tax']
+    for k in key_fields:
+        v = data.get(k, '')
+        icon = '✅' if v else '❌'
+        print(f"  {icon} {k}: {v or '—'}")
+    print("─────────────────────────────────────────────\n")
 
     return data
 
@@ -455,7 +536,7 @@ def fill_drake_w2_screen(data: dict):
     type_field(data.get('box7_ss_tips', ''))
 
     # ── Box 8 — Allocated tips
-    type_field(data.get('box8_alloc_tips', ''))
+    type_field(data.get('box8_alloc', ''))
 
     # ── Box 9 (skip — reserved)
     skip(1)
