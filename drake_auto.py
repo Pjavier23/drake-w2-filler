@@ -124,10 +124,15 @@ def open_return_by_ssn(ssn: str, log_fn=print):
     if not ssn:
         raise ValueError("No SSN provided — cannot open client return automatically.")
 
-    # Normalize SSN format: remove dashes
+    # Normalize SSN — remove dashes, handle masked (XXX-XX-1234)
     ssn_clean = re.sub(r'\D', '', ssn)
     if len(ssn_clean) != 9:
-        raise ValueError(f"Invalid SSN: {ssn} — expected 9 digits")
+        # Masked SSN — can't auto-open, wait for user to do it manually
+        log_fn(f"⚠️  SSN is masked ({ssn}) — cannot auto-open return.")
+        log_fn("   Please open the client return in Drake manually.")
+        log_fn("   Waiting 15 seconds...")
+        time.sleep(15)
+        return
 
     win = find_drake_window()
     if not win:
