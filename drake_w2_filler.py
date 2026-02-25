@@ -93,78 +93,106 @@ def extract_w2_from_pdf(pdf_path: str) -> dict:
         m = re.search(pattern, text, flags)
         return m.group(1).strip() if m else ""
 
-    # Employee SSN (box a) — critical for auto-opening client return
-    data['employee_ssn'] = find(r'(?:a\.?\s+)?Employee(?:\'s)?\s+social\s+security\s+(?:number|no\.?)[:\s]+([\d]{3}-[\d]{2}-[\d]{4})')
-    if not data['employee_ssn']:
-        data['employee_ssn'] = find(r'\b(\d{3}-\d{2}-\d{4})\b')
-
-    # Employer EIN
-    data['ein'] = find(r'(?:b\.?\s+)?Employer(?:\'s)?\s+(?:identification|ID|id)\s+(?:number|no\.?)[:\s]+([\d]{2}-[\d]{7})')
-    if not data['ein']:
-        data['ein'] = find(r'EIN[:\s]+([\d]{2}-[\d]{7})')
-    if not data['ein']:
-        data['ein'] = find(r'\b(\d{2}-\d{7})\b')
-
-    # Employer Name
-    data['employer_name'] = find(r'(?:c\.?\s+)?Employer(?:\'s)?\s+name[,\s]+address.*?[\r\n]+([^\r\n]+)')
-
-    # Employer Street/City/State/ZIP — usually line after name
-    addr_match = re.search(
-        r'(?:c\.?\s+)?Employer(?:\'s)?\s+name.*?[\r\n]+[^\r\n]+[\r\n]+([^\r\n]+)[\r\n]+([^\r\n,]+)[,\s]+([A-Z]{2})\s+([\d]{5}(?:-[\d]{4})?)',
-        text, re.IGNORECASE | re.DOTALL
-    )
-    if addr_match:
-        data['employer_street'] = addr_match.group(1).strip()
-        data['employer_city']   = addr_match.group(2).strip()
-        data['employer_state']  = addr_match.group(3).strip()
-        data['employer_zip']    = addr_match.group(4).strip()
-    else:
-        data['employer_street'] = ''
-        data['employer_city']   = ''
-        data['employer_state']  = ''
-        data['employer_zip']    = ''
-
-    # Wage boxes
-    def find_box(box_num, label_pattern):
-        patterns = [
-            rf'(?:^|\s){box_num}\s+{label_pattern}[:\s]+\$?([\d,]+(?:\.\d{{2}})?)',
-            rf'{label_pattern}[:\s\n]+\$?([\d,]+(?:\.\d{{2}})?)',
-        ]
+    # ── Helper: scan for a dollar amount near a box number or label ──────────
+    def find_amount(*patterns):
         for p in patterns:
-            val = find(p)
-            if val:
-                return clean_amount(val)
+            m = re.search(p, text, re.IGNORECASE | re.MULTILINE)
+            if m:
+                return clean_amount(m.group(1))
         return ''
 
-    data['box1_wages']         = find_box('1', r'Wages,?\s+tips')
-    data['box2_fed_tax']       = find_box('2', r'Federal\s+income\s+tax\s+withheld')
-    data['box3_ss_wages']      = find_box('3', r'Social\s+security\s+wages')
-    data['box4_ss_tax']        = find_box('4', r'Social\s+security\s+tax\s+withheld')
-    data['box5_med_wages']     = find_box('5', r'Medicare\s+wages')
-    data['box6_med_tax']       = find_box('6', r'Medicare\s+tax\s+withheld')
-    data['box7_ss_tips']       = find_box('7', r'Social\s+security\s+tips')
-    data['box8_alloc_tips']    = find_box('8', r'Allocated\s+tips')
-    data['box10_dep_care']     = find_box('10', r'Dependent\s+care')
-    data['box11_nonqual']      = find_box('11', r'Nonqualified\s+plans?')
+    # ── SSN — accept full, partial, or masked ────────────────────────────────
+    # Full:    123-45-6789
+    # Partial: XXX-XX-1234  ***-**-6789  000-00-1234
+    ssn_full    = re.search(r'\b(\d{3}-\d{2}-\d{4})\b', text)
+    ssn_partial = re.search(r'\b([X*\d]{3}-[X*\d]{2}-(\d{4}))\b', text, re.IGNORECASE)
+    if ssn_full:
+        data['employee_ssn'] = ssn_full.group(1)
+    elif ssn_partial:
+        data['employee_ssn'] = ssn_partial.group(1)   # keep masked version
+    else:
+        data['employee_ssn'] = ''
 
-    # Box 12 codes (up to 4 entries like "12a D 5000.00")
+    # ── EIN ──────────────────────────────────────────────────────────────────
+    data['ein'] = find_amount(
+        r'(?:employer.{1,30}identification|employer.{1,10}ID|EIN)[^\d]+([\d]{2}-[\d]{7})',
+        r'\b(\d{2}-\d{7})\b'
+    )
+
+    # ── Employer Name ─────────────────────────────────────────────────────────
+    # Grab the first substantial text line after "Employer" section
+    emp_name_m = re.search(
+        r'employer.{0,30}name.*?[\r\n]+([ \t]*[A-Z][A-Z &,.\'-]{3,}[ \t]*)\r?\n',
+        text, re.IGNORECASE
+    )
+    data['employer_name'] = emp_name_m.group(1).strip() if emp_name_m else ''
+
+    # ── Employer Address ──────────────────────────────────────────────────────
+    # Look for street pattern after employer name
+    street_m = re.search(r'\b(\d{1,6}\s+[A-Z][A-Za-z0-9 .]+(?:ST|AVE|BLVD|DR|RD|LN|WAY|PKWY|CT|CIR|HWY)[A-Za-z .]*)\b', text)
+    data['employer_street'] = street_m.group(1).strip() if street_m else ''
+
+    city_state_m = re.search(r'([A-Z][A-Za-z ]{2,}),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)', text)
+    if city_state_m:
+        data['employer_city']  = city_state_m.group(1).strip()
+        data['employer_state'] = city_state_m.group(2).strip()
+        data['employer_zip']   = city_state_m.group(3).strip()
+    else:
+        data['employer_city']  = ''
+        data['employer_state'] = ''
+        data['employer_zip']   = ''
+
+    # ── Wage Boxes — multiple pattern attempts per box ────────────────────────
+    def find_box(label, *extra_patterns):
+        base = [
+            rf'{label}[\s\S]{{0,60}}?\$([\d,]+(?:\.\d{{2}})?)',
+            rf'{label}[\s\S]{{0,40}}?([\d,]+\.\d{{2}})',
+            rf'{label}[^\d\n]{{0,30}}([\d,]+(?:\.\d{{2}})?)',
+        ]
+        return find_amount(*(list(extra_patterns) + base))
+
+    data['box1_wages']     = find_box(r'(?:1\s+)?Wages,?\s+tips')
+    data['box2_fed_tax']   = find_box(r'(?:2\s+)?Federal\s+income\s+tax')
+    data['box3_ss_wages']  = find_box(r'(?:3\s+)?Social\s+security\s+wages')
+    data['box4_ss_tax']    = find_box(r'(?:4\s+)?Social\s+security\s+tax')
+    data['box5_med_wages'] = find_box(r'(?:5\s+)?Medicare\s+wages')
+    data['box6_med_tax']   = find_box(r'(?:6\s+)?Medicare\s+tax')
+    data['box7_ss_tips']   = find_box(r'(?:7\s+)?Social\s+security\s+tips')
+    data['box8_alloc']     = find_box(r'(?:8\s+)?Allocated\s+tips')
+    data['box10_dep_care'] = find_box(r'(?:10\s+)?Dependent\s+care')
+    data['box11_nonqual']  = find_box(r'(?:11\s+)?Nonqualified')
+
+    # ── Box 12 codes ──────────────────────────────────────────────────────────
     data['box12'] = []
-    for m in re.finditer(r'12[a-d]?\s+([A-Z]{1,2})\s+\$?([\d,]+(?:\.\d{2})?)', text, re.IGNORECASE):
-        data['box12'].append({'code': m.group(1).upper(), 'amount': clean_amount(m.group(2))})
+    # Match patterns like "12a D 1234.56" or "Code D Amount 1234.56"
+    for m in re.finditer(
+        r'\b12[a-dA-D]?\s+([A-Z]{1,2})\s+\$?([\d,]+(?:\.\d{2})?)',
+        text
+    ):
+        code = m.group(1).upper()
+        # Skip if code looks like an address fragment
+        if len(code) <= 2 and code.isalpha():
+            data['box12'].append({'code': code, 'amount': clean_amount(m.group(2))})
 
-    # Box 13 checkboxes
-    data['box13_statutory']   = bool(re.search(r'statutory\s+employee.*?[Xx✓]|[Xx✓].*?statutory\s+employee', text, re.IGNORECASE))
-    data['box13_retirement']  = bool(re.search(r'retirement\s+plan.*?[Xx✓]|[Xx✓].*?retirement\s+plan', text, re.IGNORECASE))
-    data['box13_sick_pay']    = bool(re.search(r'third.?party\s+sick.*?[Xx✓]|[Xx✓].*?sick\s+pay', text, re.IGNORECASE))
+    # ── Box 13 checkboxes ─────────────────────────────────────────────────────
+    data['box13_statutory']  = False
+    data['box13_retirement'] = False
+    data['box13_sick_pay']   = False
 
-    # Box 14 other
+    # ── Box 14 other ──────────────────────────────────────────────────────────
     data['box14'] = []
-    for m in re.finditer(r'14\s+Other[:\s]+([^\n]+)\s+([\d,]+(?:\.\d{2})?)', text, re.IGNORECASE):
-        data['box14'].append({'label': m.group(1).strip(), 'amount': clean_amount(m.group(2))})
+    for m in re.finditer(
+        r'^([A-Z][A-Z0-9 ]{1,20})\s+([\d,]+(?:\.\d{2})?)$',
+        text, re.MULTILINE
+    ):
+        label = m.group(1).strip()
+        # Only include if it looks like a real code, not an address
+        if not any(w in label for w in ['STREET', 'AVE', 'BLVD', 'RD', 'DR', 'LN', 'OAK', 'MAIN']):
+            data['box14'].append({'label': label, 'amount': clean_amount(m.group(2))})
 
-    # State info (box 15-20)
+    # ── State boxes (15-20) ───────────────────────────────────────────────────
     state_m = re.search(
-        r'15\s+([A-Z]{2})\s+([\w-]+)\s+16\s+([\d,]+(?:\.\d{2})?)\s+17\s+([\d,]+(?:\.\d{2})?)',
+        r'\b([A-Z]{2})\b.{0,40}?(?:state.{0,20}ID|employer.{0,20}state).{0,30}?([\w-]+).{0,60}?([\d,]+(?:\.\d{2})?).{0,60}?([\d,]+(?:\.\d{2})?)',
         text, re.IGNORECASE
     )
     if state_m:
@@ -177,6 +205,12 @@ def extract_w2_from_pdf(pdf_path: str) -> dict:
         data['box15_state_id'] = ''
         data['box16_wages']    = data.get('box1_wages', '')
         data['box17_tax']      = ''
+
+    # ── Log what was found ────────────────────────────────────────────────────
+    found    = [k for k, v in data.items() if v and v != [] and v != '']
+    missing  = [k for k, v in data.items() if not v or v == [] or v == '']
+    print(f"\n  ✅ Found:   {', '.join(found)}")
+    print(f"  ❌ Missing: {', '.join(missing) or 'none'}\n")
 
     return data
 
@@ -600,16 +634,21 @@ class App:
             def ask():
                 summary = (
                     f"Ready to fill Drake W-2\n\n"
-                    f"EIN:          {data.get('ein') or '—'}\n"
-                    f"Employer:     {data.get('employer_name') or '—'}\n"
-                    f"Box 1 Wages:  {data.get('box1_wages') or '—'}\n"
-                    f"Box 2 Fed Tax:{data.get('box2_fed_tax') or '—'}\n"
-                    f"Box 3 SS Wg:  {data.get('box3_ss_wages') or '—'}\n"
-                    f"Box 4 SS Tax: {data.get('box4_ss_tax') or '—'}\n"
-                    f"Box 5 Med Wg: {data.get('box5_med_wages') or '—'}\n"
-                    f"Box 6 Med Tx: {data.get('box6_med_tax') or '—'}\n"
-                    f"State:        {data.get('box15_state') or '—'}\n\n"
-                    f"SSN:          {data.get('employee_ssn') or '—'}\n\n"
+                    + "\n".join([
+                        f"{'✅' if data.get(k) else '❌'} {lbl}: {data.get(k) or '—'}"
+                        for k, lbl in [
+                            ('employee_ssn',  'SSN         '),
+                            ('ein',           'EIN         '),
+                            ('employer_name', 'Employer    '),
+                            ('box1_wages',    'Box 1 Wages '),
+                            ('box2_fed_tax',  'Box 2 FedTax'),
+                            ('box3_ss_wages', 'Box 3 SS Wg '),
+                            ('box4_ss_tax',   'Box 4 SS Tax'),
+                            ('box5_med_wages','Box 5 Med Wg'),
+                            ('box6_med_tax',  'Box 6 Med Tx'),
+                            ('box15_state',   'State       '),
+                        ]
+                    ]) + "\n\n"
                     f"─────────────────────────────\n" +
                     (
                         f"FULL AUTO: Will open Drake, find client\nby SSN, navigate to W-2, and fill.\nJust click YES and stay out of the way."
