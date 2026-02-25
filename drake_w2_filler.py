@@ -406,6 +406,12 @@ def fill_drake_w2_screen(data: dict):
     # Countdown is handled by the caller (process_pdf) before this function runs
     print("  ⌨️  Starting field fill...")
 
+    # Navigate to EIN field precisely regardless of where cursor is
+    # Ctrl+Home goes to first field (TS), then Tab x3 lands on EIN
+    pyautogui.hotkey('ctrl', 'home')
+    time.sleep(0.3)
+    tab(3)  # Skip: TS dropdown → F checkbox → Special tax treatment → lands on EIN
+
     # ── EIN
     type_field(data.get('ein', ''))
 
@@ -672,7 +678,7 @@ class App:
                     run_full_auto(data, fill_drake_w2_screen, log_fn=self.log_msg)
                 else:
                     # ── MANUAL MODE ─────────────────────────────────────────
-                    self.log_msg("⏳ 5 seconds — click the EIN field in Drake NOW!")
+                    self.log_msg("⏳ 5 seconds — click ANYWHERE on the Drake W-2 screen!")
                     for i in range(5, 0, -1):
                         self.log_msg(f"   {i}...")
                         time.sleep(1)
