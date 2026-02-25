@@ -464,129 +464,136 @@ def skip(n=1):
 
 def fill_drake_w2_screen(data: dict):
     """
-    Fill the Drake W-2 entry screen.
+    Smart fill — knows exactly what data it has, navigates directly
+    to the first field with data, logs every action.
 
-    Tab order on the Drake W-2 screen (confirmed from screenshot):
-      [TS dropdown] [F checkbox] [Special tax treatment]
-      EIN → Name → Name cont → Street → City → State → ZIP
-      Box1 → Box2 → Box3 → Box4 → Box5 → Box6 → Box7 → Box8 → Box9 → Box10
-      Employee First → Employee Last → Employee Street → Employee City → Employee State → Employee ZIP
-      Box11 → Box12(row1: Code, Amount, Year) × 3 rows
-      Box13 checkboxes (Statutory, Retirement, Sick pay)
-      Box14(row1: Label, Amount) × 2 rows
-      Box15(ST, StateID) → Box16 → Box17 → Box18 → Box19 → Box20 × 2 rows
+    Tab positions from Ctrl+Home (TS = position 0):
+      0: TS   1: F   2: Special   3: EIN   4: Name   5: NameCont
+      6: Street   7: City   8: State   9: ZIP
+      10: Box1  11: Box2  12: Box3  13: Box4  14: Box5  15: Box6
+      16: Box7  17: Box8  18: Box9  19: Box10
+      20-25: Employee name/address (skip)
+      26: Box11
+      27-35: Box12 (3 rows × code/amount/year)
+      36-38: Box13 checkboxes
+      39-42: Box14 (2 rows × label/amount)
+      43: Box15 State  44: Box15 StateID  45: Box16  46: Box17
     """
-
-    # ── Step 1: Check Drake window is visible (more reliable than process name check)
     if not find_drake_window():
-        raise RuntimeError(
-            "Could not find the Drake Tax window.\n"
-            "Make sure Drake is open with a return loaded and the W-2 screen visible."
-        )
+        raise RuntimeError("Could not find the Drake Tax window.")
 
-    # Countdown is handled by the caller (process_pdf) before this function runs
-    print("  ⌨️  Starting field fill...")
+    # ── Build ordered fill plan ───────────────────────────────────────────────
+    # Each entry: (tab_position, label, value_or_None)
+    FIELDS = [
+        (3,  'EIN',           data.get('ein')),
+        (4,  'Employer Name', data.get('employer_name')),
+        (5,  'Name cont',     None),  # always skip
+        (6,  'Street',        data.get('employer_street')),
+        (7,  'City',          data.get('employer_city')),
+        (8,  'State',         data.get('employer_state')),
+        (9,  'ZIP',           data.get('employer_zip')),
+        (10, 'Box 1 Wages',   data.get('box1_wages')),
+        (11, 'Box 2 FedTax',  data.get('box2_fed_tax')),
+        (12, 'Box 3 SSWages', data.get('box3_ss_wages')),
+        (13, 'Box 4 SSTax',   data.get('box4_ss_tax')),
+        (14, 'Box 5 MedWage', data.get('box5_med_wages')),
+        (15, 'Box 6 MedTax',  data.get('box6_med_tax')),
+        (16, 'Box 7 SSTips',  data.get('box7_ss_tips')),
+        (17, 'Box 8 Alloc',   data.get('box8_alloc')),
+        (18, 'Box 9',         None),
+        (19, 'Box 10 DepCare',data.get('box10_dep_care')),
+    ]
+    # Employee name/address: positions 20-25 — always skip
+    FIELDS += [(i, f'EmpAddr{i}', None) for i in range(20, 26)]
+    FIELDS += [(26, 'Box 11 NonQual', data.get('box11_nonqual'))]
 
-    # Navigate to EIN field precisely regardless of where cursor is
-    # Ctrl+Home goes to first field (TS), then Tab x3 lands on EIN
-    pyautogui.hotkey('ctrl', 'home')
-    time.sleep(0.3)
-    tab(3)  # Skip: TS dropdown → F checkbox → Special tax treatment → lands on EIN
-
-    # ── EIN
-    type_field(data.get('ein', ''))
-
-    # ── Employer Name
-    type_field(data.get('employer_name', ''))
-
-    # ── Name cont (skip)
-    skip(1)
-
-    # ── Street
-    type_field(data.get('employer_street', ''))
-
-    # ── City
-    type_field(data.get('employer_city', ''))
-
-    # ── State (2-letter dropdown — just type it)
-    type_field(data.get('employer_state', ''))
-
-    # ── ZIP
-    type_field(data.get('employer_zip', ''))
-
-    # ── Box 1 — Wages
-    type_field(data.get('box1_wages', ''))
-
-    # ── Box 2 — Federal tax w/h
-    type_field(data.get('box2_fed_tax', ''))
-
-    # ── Box 3 — SS wages
-    type_field(data.get('box3_ss_wages', ''))
-
-    # ── Box 4 — SS w/h
-    type_field(data.get('box4_ss_tax', ''))
-
-    # ── Box 5 — Medicare wages
-    type_field(data.get('box5_med_wages', ''))
-
-    # ── Box 6 — Medicare tax w/h
-    type_field(data.get('box6_med_tax', ''))
-
-    # ── Box 7 — SS tips
-    type_field(data.get('box7_ss_tips', ''))
-
-    # ── Box 8 — Allocated tips
-    type_field(data.get('box8_alloc', ''))
-
-    # ── Box 9 (skip — reserved)
-    skip(1)
-
-    # ── Box 10 — Dep care benefit
-    type_field(data.get('box10_dep_care', ''))
-
-    # ── Employee name/address (skip — same as screen 1 usually)
-    skip(6)
-
-    # ── Box 11 — Nonqualified plan
-    type_field(data.get('box11_nonqual', ''))
-
-    # ── Box 12 rows (3 rows × Code + Amount + Year)
+    # Box 12 rows
     box12 = data.get('box12', [])
+    pos = 27
     for i in range(3):
         if i < len(box12):
-            type_field(box12[i].get('code', ''))
-            type_field(box12[i].get('amount', ''))
-            skip(1)  # Year
+            FIELDS.append((pos,   f'Box12 Code',   box12[i].get('code')))
+            FIELDS.append((pos+1, f'Box12 Amount', box12[i].get('amount')))
         else:
-            skip(3)
+            FIELDS.append((pos,   f'Box12 Code',   None))
+            FIELDS.append((pos+1, f'Box12 Amount', None))
+        FIELDS.append((pos+2, f'Box12 Year', None))
+        pos += 3
 
-    # ── Box 13 checkboxes — Statutory, Retirement, Sick pay
-    # Checkboxes: press Space to check, Tab to move on
-    def checkbox(checked: bool):
-        if checked:
-            pyautogui.press('space')
-            time.sleep(FILL_DELAY)
-        tab(1)
+    # Box 13 checkboxes
+    FIELDS += [
+        (pos,   'Box13 Statutory',  'check' if data.get('box13_statutory')  else None),
+        (pos+1, 'Box13 Retirement', 'check' if data.get('box13_retirement') else None),
+        (pos+2, 'Box13 SickPay',    'check' if data.get('box13_sick_pay')   else None),
+    ]
+    pos += 3
 
-    checkbox(data.get('box13_statutory', False))
-    checkbox(data.get('box13_retirement', False))
-    checkbox(data.get('box13_sick_pay', False))
-
-    # ── Box 14 — Other (2 rows: label + amount)
+    # Box 14
     box14 = data.get('box14', [])
     for i in range(2):
         if i < len(box14):
-            type_field(box14[i].get('label', ''))
-            type_field(box14[i].get('amount', ''))
+            FIELDS.append((pos,   f'Box14 Label',  box14[i].get('label')))
+            FIELDS.append((pos+1, f'Box14 Amount', box14[i].get('amount')))
         else:
-            skip(2)
+            FIELDS.append((pos,   f'Box14 Label',  None))
+            FIELDS.append((pos+1, f'Box14 Amount', None))
+        pos += 2
 
-    # ── Box 15-20 — State row 1
-    type_field(data.get('box15_state', ''))
-    type_field(data.get('box15_state_id', ''))
-    type_field(data.get('box16_wages', ''))
-    type_field(data.get('box17_tax', ''))
-    skip(2)  # Box 18, 19, 20 (local — skip unless provided)
+    # Box 15-17
+    FIELDS += [
+        (pos,   'Box15 State',   data.get('box15_state')),
+        (pos+1, 'Box15 StateID', data.get('box15_state_id')),
+        (pos+2, 'Box16 Wages',   data.get('box16_wages')),
+        (pos+3, 'Box17 Tax',     data.get('box17_tax')),
+    ]
+
+    # ── Log what will be filled ───────────────────────────────────────────────
+    will_fill = [(tab_pos, lbl, val) for tab_pos, lbl, val in FIELDS if val and val != 'check']
+    will_check = [(tab_pos, lbl) for tab_pos, lbl, val in FIELDS if val == 'check']
+    will_skip  = [(tab_pos, lbl) for tab_pos, lbl, val in FIELDS if not val]
+
+    print(f"\n  📋 FILL PLAN:")
+    print(f"  Will type  ({len(will_fill)} fields): " + ", ".join(f"{lbl}={val}" for _, lbl, val in will_fill))
+    if will_check:
+        print(f"  Will check ({len(will_check)} boxes): "  + ", ".join(lbl for _, lbl in will_check))
+    print(f"  Will skip  ({len(will_skip)} fields): " + ", ".join(lbl for _, lbl in will_skip[:8]) + ("..." if len(will_skip) > 8 else ""))
+
+    if not will_fill and not will_check:
+        raise RuntimeError("No data to fill — extraction found nothing. Check the PDF.")
+
+    # Find first tab position with actual data
+    first_pos = min(tab_pos for tab_pos, _, val in FIELDS if val)
+    print(f"\n  🎯 Starting at: tab position {first_pos} ({next(lbl for tp, lbl, val in FIELDS if tp == first_pos and val)})")
+
+    # ── Navigate to starting position ────────────────────────────────────────
+    print("  ⌨️  Filling now...")
+    pyautogui.hotkey('ctrl', 'home')
+    time.sleep(0.4)
+    tab(first_pos)   # Jump directly to first field with data
+
+    # ── Fill fields in order from first_pos ──────────────────────────────────
+    current_pos = first_pos
+    for tab_pos, label, value in sorted(FIELDS, key=lambda x: x[0]):
+        if tab_pos < first_pos:
+            continue  # Already passed these
+
+        # Tab forward from current position to this field
+        tabs_needed = tab_pos - current_pos
+        if tabs_needed > 0:
+            tab(tabs_needed)
+        current_pos = tab_pos
+
+        if value == 'check':
+            pyautogui.press('space')
+            time.sleep(FILL_DELAY)
+            print(f"  ✅ Checked: {label}")
+        elif value:
+            pyperclip.copy(str(value))
+            pyautogui.hotkey('ctrl', 'a')
+            pyautogui.hotkey('ctrl', 'v')
+            time.sleep(FILL_DELAY)
+            print(f"  ✅ Typed: {label} = {value}")
+        # No value → already tabbed past it
 
     print("✅ Fill complete! Review fields in Drake before saving.")
 
