@@ -108,6 +108,65 @@ def extract_w2_from_pdf(pdf_path: str) -> dict:
     print(text[:3000])
     print('='*60 + "\n")
 
+    # ── Strategy 0: Verified patterns (tested against real ADP W-2s) ─────────
+    def clean_v(v): return re.sub(r'[$,\s]', '', v or '').strip()
+
+    def pair(label_pattern):
+        """Match label to end of line, grab first two amounts on next line."""
+        m = re.search(label_pattern + r'[^\n]*\n([\d,]+\.\d{2})\s+([\d,]+\.\d{2})', text, re.IGNORECASE)
+        return (clean_v(m.group(1)), clean_v(m.group(2))) if m else ('', '')
+
+    # EIN
+    ein_m = re.search(r'\b(\d{2}-\d{7})\b', text)
+    if ein_m: data['ein'] = ein_m.group(1)
+
+    # SSN (full or masked)
+    ssn_m = re.search(r'\b(\d{3}-\d{2}-\d{4})\b', text)
+    if not ssn_m: ssn_m = re.search(r'\b([Xx*]{3}-[Xx*]{2}-\d{4})\b', text)
+    if ssn_m: data['employee_ssn'] = ssn_m.group(1)
+
+    # Employer name (pdfplumber concatenates: "Employer'sname,address...")
+    emp_m = re.search(r"Employer.{0,5}name[^\n]+\n([A-Z][A-Z0-9 &.,'\-]+)\n", text, re.IGNORECASE)
+    if emp_m: data['employer_name'] = emp_m.group(1).strip()
+
+    # Street address
+    st_m = re.search(r'\n(\d{3,5}\s+[A-Z][A-Za-z0-9 ]+(?:DRIVE|DR|AVE|BLVD|ST|RD|LN|WAY|PKWY|COURT|CT)[A-Za-z0-9 .]*)\n', text, re.IGNORECASE)
+    if st_m: data['employer_street'] = st_m.group(1).strip()
+
+    # City / State / ZIP (handles "SUITE N\nCITY, ST ZIP" layout)
+    csz_m = re.search(r'(?:SUITE\s+\d+\n|^)([A-Z][A-Za-z ]{2,}),?\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)', text, re.MULTILINE)
+    if csz_m:
+        data['employer_city']  = csz_m.group(1).strip()
+        data['employer_state'] = csz_m.group(2).strip()
+        data['employer_zip']   = csz_m.group(3).strip()
+
+    # Wage boxes — label anchors next-line amounts
+    data['box1_wages'],    data['box2_fed_tax']  = pair(r'1\s*Wages,?tips')
+    data['box3_ss_wages'], data['box4_ss_tax']   = pair(r'3\s*Social\s*security\s*wages')
+    data['box5_med_wages'],data['box6_med_tax']  = pair(r'5\s*Medicare\s*wages')
+
+    # State (box 15-17) — pattern: "STATE STATE_ID AMOUNT"
+    st_box_m = re.search(
+        r'\n(VA|MD|CA|TX|NY|FL|OH|PA|IL|NJ|WA|CO|GA|NC|AZ|MA|MN|MO|WI|IN|TN|KY|SC|AL|LA|OR|CT|UT|AR|MS|KS|NV|NM|NE|IA|ID|ME|NH|RI|HI|MT|DE|SD|ND|VT|WY|AK|DC)\s+([\w\-]+)\s+([\d,]+\.\d{2})',
+        text
+    )
+    if st_box_m:
+        data['box15_state']    = st_box_m.group(1)
+        data['box15_state_id'] = st_box_m.group(2)
+        data['box17_tax']      = clean_v(st_box_m.group(3))
+        data['box16_wages']    = data['box1_wages']  # state wages = federal wages typically
+
+    print(f"\n── Extraction (verified patterns) ──────────────────────")
+    for k in ['ein','employee_ssn','employer_name','employer_street','employer_city',
+              'box1_wages','box2_fed_tax','box3_ss_wages','box4_ss_tax',
+              'box5_med_wages','box6_med_tax','box15_state','box16_wages','box17_tax']:
+        v = data.get(k,'')
+        print(f"  {'✅' if v else '❌'} {k}: {v or '—'}")
+
+    # Return early if we got the key fields
+    if data.get('box1_wages'):
+        return data
+
     # ── Strategy 1: Word-position based extraction ────────────────────────────
     # W-2 box amounts are in standardized positions on the page
     # Right half of page = wage/tax amounts; left half = labels/identifiers
